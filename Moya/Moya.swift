@@ -101,16 +101,19 @@ public class MoyaProvider<T: MoyaTarget> {
     /// Closure that resolves an Endpoint into an NSURLRequest.
     public typealias MoyaEndpointResolution = (endpoint: Endpoint<T>) -> (NSURLRequest)
     public typealias MoyaStubbedBehavior = ((T) -> (Moya.StubbedBehavior))
+    public typealias MoyaCredentialClosure = (T) -> (NSURLCredential?)
     
     public let endpointClosure: MoyaEndpointsClosure
     public let endpointResolver: MoyaEndpointResolution
+    public let credentialClosure: MoyaCredentialClosure?
     public let stubBehavior: MoyaStubbedBehavior
     public let networkActivityClosure: Moya.NetworkActivityClosure?
     
     /// Initializes a provider.
-    public init(endpointClosure: MoyaEndpointsClosure = MoyaProvider.DefaultEndpointMapping, endpointResolver: MoyaEndpointResolution = MoyaProvider.DefaultEnpointResolution, stubBehavior: MoyaStubbedBehavior = MoyaProvider.NoStubbingBehavior, networkActivityClosure: Moya.NetworkActivityClosure? = nil) {
+    public init(endpointClosure: MoyaEndpointsClosure = MoyaProvider.DefaultEndpointMapping, endpointResolver: MoyaEndpointResolution = MoyaProvider.DefaultEnpointResolution, stubBehavior: MoyaStubbedBehavior = MoyaProvider.NoStubbingBehavior, credentialClosure: MoyaCredentialClosure? = nil, networkActivityClosure: Moya.NetworkActivityClosure? = nil) {
         self.endpointClosure = endpointClosure
         self.endpointResolver = endpointResolver
+        self.credentialClosure = credentialClosure
         self.stubBehavior = stubBehavior
         self.networkActivityClosure = networkActivityClosure
     }
@@ -124,11 +127,12 @@ public class MoyaProvider<T: MoyaTarget> {
     public func request(token: T, completion: MoyaCompletion) -> Cancellable {
         let endpoint = self.endpoint(token)
         let request = endpointResolver(endpoint: endpoint)
+        let credential = credentialClosure?(token)
         let stubBehavior = self.stubBehavior(token)
-
+        
         switch stubBehavior {
         case .NoStubbing:
-            return sendRequest(request, completion: completion)
+            return sendRequest(request, credential:credential, completion: completion)
         default:
             return stubRequest(request, completion: completion, endpoint: endpoint, stubBehavior: stubBehavior)
         }
@@ -157,26 +161,31 @@ public class MoyaProvider<T: MoyaTarget> {
 }
 
 private extension MoyaProvider {
-    func sendRequest(request: NSURLRequest, completion: MoyaCompletion) -> CancellableToken {
-
+    func sendRequest(request: NSURLRequest, credential: NSURLCredential?, completion: MoyaCompletion) -> CancellableToken {
+        
         networkActivityClosure?(change: .Began)
-
+        
         // We need to keep a reference to the closure without a reference to ourself.
         let networkActivityCallback = networkActivityClosure
-        let request = Alamofire.Manager.sharedInstance.request(request)
-            .response { (request: NSURLRequest, response: NSHTTPURLResponse?, data: AnyObject?, error: NSError?) -> () in
-                networkActivityCallback?(change: .Ended)
-
-                // Alamofire always sends the data param as an NSData? type, but we'll
-                // add a check just in case something changes in the future.
-                let statusCode = response?.statusCode
-                if let data = data as? NSData {
-                    completion(data: data, statusCode: statusCode, response:response, error: error)
-                } else {
-                    completion(data: nil, statusCode: statusCode, response:response, error: error)
-                }
+        var request = Alamofire.Manager.sharedInstance.request(request)
+        
+        if let cred = credential {
+            request = request.authenticate(usingCredential: cred)
         }
-
+        
+        request.response { (request: NSURLRequest, response: NSHTTPURLResponse?, data: AnyObject?, error: NSError?) -> () in
+            networkActivityCallback?(change: .Ended)
+            
+            // Alamofire always sends the data param as an NSData? type, but we'll
+            // add a check just in case something changes in the future.
+            let statusCode = response?.statusCode
+            if let data = data as? NSData {
+                completion(data: data, statusCode: statusCode, response:response, error: error)
+            } else {
+                completion(data: nil, statusCode: statusCode, response:response, error: error)
+            }
+        }
+        
         return CancellableToken {
             request.cancel()
         }
